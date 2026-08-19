@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>QR Bridge</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/3.4.0/jsQR.min.js"></script>
+<style>
+:root {
+  --bg:     #07090b;
+  --s1:     #0d1117;
+  --s2:     #161c24;
+  --border: #21303d;
+  --ac:     #00c9a7;
+  --ac2:    #00a88c;
+  --green:  #2dd48a;
+  --amber:  #f5a623;
+  --red:    #ff5555;
+  --text:   #ccd8e0;
+  --muted:  #546e7a;
+  --mono:   'Consolas', 'Courier New', monospace;
+  --sans:   -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { height: 100%; font-family: var(--sans); background: var(--bg); color: var(--text); overflow: hidden; }
+
+#app { height: 100%; display: flex; flex-direction: column; }
+
+.screen { display: none; flex-direction: column; height: 100%; }
+.screen.active { display: flex; }
+.hidden { display: none !important; }
+
+/* NAV */
+.nav {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--s1);
+  flex-shrink: 0;
+}
+.nav-title { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+.btn-back {
+  background: none; border: 1px solid var(--border); color: var(--ac);
+  cursor: pointer; font-size: 0.75rem; font-family: var(--sans);
+  padding: 4px 10px; border-radius: 6px; transition: border-color .15s, background .15s;
+}
+.btn-back:hover { border-color: var(--ac); background: rgba(0,201,167,.07); }
+
+/* ===================== HOME ===================== */
+#screen-home {
+  align-items: center; justify-content: center;
+  gap: 30px; padding: 32px 20px; text-align: center;
+}
+.brand-name {
+  font-family: var(--mono); font-size: 2.4rem; font-weight: 700;
+  letter-spacing: -.03em; color: var(--text);
+}
+.brand-name em { color: var(--ac); font-style: normal; }
+.brand-sub { font-size: 0.68rem; color: var(--muted); letter-spacing: .2em; text-transform: uppercase; margin-top: 4px; }
+
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; width: 100%; max-width: 340px; }
+.mode-card {
+  background: var(--s1); border: 1px solid var(--border); border-radius: 14px;
+  padding: 22px 14px; cursor: pointer; display: flex; flex-direction: column;
+  align-items: center; gap: 7px;
+  transition: border-color .15s, transform .15s, background .15s;
+  user-select: none;
+}
+.mode-card:hover { border-color: var(--ac); background: rgba(0,201,167,.05); transform: translateY(-2px); }
+.mode-card:active { transform: translateY(0); }
+.mc-icon { font-size: 1.9rem; }
+.mc-label { font-weight: 700; font-size: 0.9rem; }
+.mc-hint { font-size: 0.68rem; color: var(--muted); }
+.home-note { font-size: 0.7rem; color: var(--muted); max-width: 270px; line-height: 1.7; }
+
+/* ===================== SEND ===================== */
+.send-body {
+  flex: 1; overflow-y: auto; padding: 18px 14px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+.dropzone {
+  border: 2px dashed var(--border); border-radius: 14px;
+  padding: 36px 20px; text-align: center; cursor: pointer; width: 100%; max-width: 360px;
+  transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.over { border-color: var(--ac); background: rgba(0,201,167,.04); }
+.dz-icon { font-size: 2rem; margin-bottom: 8px; }
+.dz-p { font-size: 0.85rem; font-weight: 500; }
+.dz-s { font-size: 0.68rem; color: var(--muted); margin-top: 5px; }
+
+/* Active sender */
+.send-panel {
+  display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%;
+}
+
+@keyframes qrPulse {
+  0%,100% { box-shadow: 0 0 20px rgba(0,201,167,.12), 0 6px 30px rgba(0,0,0,.6); }
+  50%      { box-shadow: 0 0 44px rgba(0,201,167,.32), 0 6px 30px rgba(0,0,0,.6); }
+}
+.qr-wrap { background: #fff; border-radius: 10px; padding: 10px; display: inline-block; box-shadow: 0 6px 30px rgba(0,0,0,.6); }
+.qr-wrap.pulsing { animation: qrPulse 1.4s ease-in-out infinite; }
+
+.ctr-label { font-size: 0.6rem; letter-spacing: .22em; text-transform: uppercase; color: var(--muted); }
+.ctr {
+  font-family: var(--mono); font-size: 1.9rem; font-weight: 700;
+  letter-spacing: .07em; color: var(--text);
+}
+.ctr em { color: var(--muted); font-style: normal; font-weight: 400; }
+
+.prog-bar { width: 100%; max-width: 360px; height: 3px; background: var(--s2); border-radius: 2px; overflow: hidden; }
+.prog-fill { height: 100%; background: var(--ac); border-radius: 2px; width: 0%; transition: width .12s ease; }
+
+.controls { display: flex; gap: 7px; align-items: center; }
+.btn-c {
+  background: var(--s2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 8px 13px; cursor: pointer; font-size: 0.95rem;
+  transition: border-color .1s, background .1s; line-height: 1;
+}
+.btn-c:hover { border-color: var(--ac); background: var(--s1); }
+.btn-c.ac {
+  background: var(--ac); color: #040d0a; border-color: var(--ac);
+  font-weight: 700; font-size: 0.82rem; padding: 8px 16px;
+}
+.btn-c.ac:hover { background: var(--ac2); border-color: var(--ac2); }
+
+.speed-row { display: flex; align-items: center; gap: 9px; width: 100%; max-width: 360px; }
+.sp-lbl { font-size: 0.67rem; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+input[type=range] { flex: 1; accent-color: var(--ac); cursor: pointer; }
+.file-meta { font-size: 0.67rem; color: var(--muted); font-family: var(--mono); text-align: center; }
+.btn-txt { background: none; border: none; color: var(--muted); font-size: 0.72rem; cursor: pointer; text-decoration: underline; font-family: var(--sans); padding: 2px; }
+.btn-txt:hover { color: var(--text); }
+
+/* ===================== RECEIVE ===================== */
+.recv-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.cam-wrap {
+  position: relative; flex-shrink: 0; background: #000;
+  height: min(48vw, 260px); overflow: hidden;
+}
+#recv-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+
+.scan-target { position: relative; width: 160px; height: 160px; }
+.c { position: absolute; width: 22px; height: 22px; }
+.c::before, .c::after { content: ''; position: absolute; background: var(--ac); }
+.tl::before { top: 0; left: 0; width: 3px; height: 22px; border-radius: 2px 0 0 0; }
+.tl::after  { top: 0; left: 0; width: 22px; height: 3px; border-radius: 2px 0 0 0; }
+.tr::before { top: 0; right: 0; width: 3px; height: 22px; border-radius: 0 2px 0 0; }
+.tr::after  { top: 0; right: 0; width: 22px; height: 3px; border-radius: 0 2px 0 0; }
+.bl::before { bottom: 0; left: 0; width: 3px; height: 22px; border-radius: 0 0 0 2px; }
+.bl::after  { bottom: 0; left: 0; width: 22px; height: 3px; border-radius: 0 0 0 2px; }
+.br::before { bottom: 0; right: 0; width: 3px; height: 22px; border-radius: 0 0 2px 0; }
+.br::after  { bottom: 0; right: 0; width: 22px; height: 3px; border-radius: 0 0 2px 0; }
+
+@keyframes scanLine { 0% { transform: translateY(-72px); opacity: .9; } 100% { transform: translateY(72px); opacity: 0; } }
+.scan-line {
+  position: absolute; top: 50%; left: 8px; right: 8px; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--ac) 40%, var(--ac) 60%, transparent);
+  animation: scanLine 1.8s ease-in-out infinite;
+}
+
+.recv-info { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 11px; }
+
+.status-text { font-size: 0.85rem; font-weight: 500; line-height: 1.45; }
+
+@keyframes cellOn {
+  0%   { background: var(--ac); transform: scale(1.5); }
+  65%  { background: var(--green); transform: scale(1.15); }
+  100% { background: var(--green); transform: scale(1); }
+}
+.chunk-grid { display: flex; flex-wrap: wrap; gap: 2px; max-height: 82px; overflow-y: auto; }
+.gc { width: 9px; height: 9px; border-radius: 2px; background: var(--s2); }
+.gc.on { background: var(--green); animation: cellOn .35s ease-out forwards; }
+
+.recv-ctr { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+.miss-note { font-size: 0.68rem; color: var(--amber); font-family: var(--mono); }
+
+.btn-dl {
+  width: 100%; padding: 13px; background: var(--ac); color: #040d0a;
+  border: none; border-radius: 10px; font-size: 0.9rem; font-weight: 700;
+  cursor: pointer; letter-spacing: .03em; transition: opacity .15s, transform .1s;
+}
+.btn-dl:hover { opacity: .87; transform: translateY(-1px); }
+.btn-outline {
+  width: 100%; padding: 9px; background: none; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 0.78rem;
+  cursor: pointer; font-family: var(--sans); transition: border-color .15s, color .15s;
+}
+.btn-outline:hover { border-color: var(--red); color: var(--red); }
+.recv-actions { display: flex; flex-direction: column; gap: 8px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ========= HOME ========= -->
+  <div id="screen-home" class="screen active">
+    <div>
+      <div class="brand-name">QR<em>BRIDGE</em></div>
+      <div class="brand-sub">file transfer via QR stream</div>
+    </div>
+    <div class="mode-grid">
+      <div class="mode-card" onclick="setMode('send')">
+        <div class="mc-icon">📤</div>
+        <div class="mc-label">Send</div>
+        <div class="mc-hint">Desktop / display side</div>
+      </div>
+      <div class="mode-card" onclick="setMode('receive')">
+        <div class="mc-icon">📷</div>
+        <div class="mc-label">Receive</div>
+        <div class="mc-hint">Android / camera side</div>
+      </div>
+    </div>
+    <div class="home-note">
+      Open <strong>Send</strong> on your Windows desktop,<br>
+      <strong>Receive</strong> on your Android device.<br>
+      Recommended: files under 500 KB.
+    </div>
+  </div>
+
+  <!-- ========= SEND ========= -->
+  <div id="screen-send" class="screen">
+    <div class="nav">
+      <button class="btn-back" onclick="goHome()">← Back</button>
+      <span class="nav-title">Send File</span>
+    </div>
+    <div class="send-body">
+
+      <div id="send-setup">
+        <div id="dropzone" class="dropzone">
+          <div class="dz-icon">📂</div>
+          <div class="dz-p">Drop a file here, or click to browse</div>
+          <div class="dz-s">Best for files under 500 KB — larger files take minutes</div>
+        </div>
+        <input type="file" id="file-input" style="display:none">
+      </div>
+
+      <div id="send-panel" class="send-panel hidden">
+        <div class="ctr-label">FRAME</div>
+        <div class="ctr">
+          <span id="cur-f">0001</span><em> / </em><span id="tot-f">????</span>
+        </div>
+        <div class="qr-wrap" id="qr-wrap">
+          <div id="qr-out"></div>
+        </div>
+        <div class="prog-bar"><div class="prog-fill" id="send-prog"></div></div>
+        <div class="controls">
+          <button class="btn-c" onclick="prevF()" title="Previous frame">⏮</button>
+          <button class="btn-c ac" id="play-btn" onclick="togglePlay()">⏸ Pause</button>
+          <button class="btn-c" onclick="nextF()" title="Next frame">⏭</button>
+          <button class="btn-c" onclick="resetPlay()" title="Restart">↺</button>
+        </div>
+        <div class="speed-row">
+          <span class="sp-lbl">INTERVAL</span>
+          <input type="range" id="sp-range" min="80" max="2000" value="200" step="20">
+          <span class="sp-lbl" id="sp-val">200ms</span>
+        </div>
+        <div class="file-meta" id="file-meta"></div>
+        <button class="btn-txt" onclick="changeFile()">↩ Change file</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ========= RECEIVE ========= -->
+  <div id="screen-receive" class="screen">
+    <div class="nav">
+      <button class="btn-back" onclick="goHome()">← Back</button>
+      <span class="nav-title">Receive File</span>
+    </div>
+    <div class="recv-body">
+      <div class="cam-wrap">
+        <video id="recv-video" playsinline autoplay muted></video>
+        <canvas id="scan-canvas" style="display:none"></canvas>
+        <div class="cam-overlay">
+          <div class="scan-target">
+            <span class="c tl"></span><span class="c tr"></span>
+            <span class="c bl"></span><span class="c br"></span>
+            <div class="scan-line"></div>
+          </div>
+        </div>
+      </div>
+      <div class="recv-info">
+        <div class="status-text" id="recv-status">📡 Point camera at the QR stream on the other screen</div>
+        <div class="prog-bar"><div class="prog-fill" id="recv-prog"></div></div>
+        <div class="recv-ctr" id="recv-ctr"></div>
+        <div class="miss-note hidden" id="miss-note"></div>
+        <div class="chunk-grid" id="chunk-grid"></div>
+        <div id="recv-actions" class="recv-actions hidden">
+          <button class="btn-dl" onclick="dlFile()">💾 Download File</button>
+          <button class="btn-outline" onclick="clearRecv()">🗑 Start Over</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- #app -->
+
+<script>
+// ====================================================
+// CONSTANTS
+// ====================================================
+const CHUNK = 600;                           // base64 chars per QR frame
+const QSZ   = Math.min(300, window.innerWidth - 56); // responsive QR size
+
+// ====================================================
+// SEND STATE
+// ====================================================
+let frames=[], fi=0, playing=false, timer=null, spd=200, qr=null;
+
+// ====================================================
+// RECEIVE STATE
+// ====================================================
+let rxd={}, rxN=0, rxName='', rxDone=false, lastQR=null, camStream=null, rafId=null;
+
+// ====================================================
+// NAVIGATION
+// ====================================================
+function setMode(m) { showScreen('screen-'+m); if (m==='receive') startCam(); }
+function goHome() {
+  showScreen('screen-home');
+  if (playing) stopPlay();
+  stopCam();
+  document.getElementById('send-setup').classList.remove('hidden');
+  document.getElementById('send-panel').classList.add('hidden');
+}
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+// ====================================================
+// SENDER — FILE LOADING
+// ====================================================
+const dz = document.getElementById('dropzone');
+const inp = document.getElementById('file-input');
+
+dz.addEventListener('click', ()=>inp.click());
+dz.addEventListener('dragover', e=>{ e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', ()=>dz.classList.remove('over'));
+dz.addEventListener('drop', e=>{ e.preventDefault(); dz.classList.remove('over'); if(e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); });
+inp.addEventListener('change', e=>{ if(e.target.files[0]) load(e.target.files[0]); });
+
+function load(file) {
+  const r = new FileReader();
+  r.onload = e => buildFrames(ab64(e.target.result), file.name, file.size);
+  r.readAsArrayBuffer(file);
+}
+
+function ab64(buf) {
+  const b = new Uint8Array(buf);
+  let s = '';
+  for (let i=0; i<b.length; i+=8192) s += String.fromCharCode(...b.subarray(i, i+8192));
+  return btoa(s);
+}
+
+function buildFrames(b64, name, size) {
+  const safe  = name.substring(0, 48);
+  const total = Math.ceil(b64.length / CHUNK);
+  frames = [];
+  for (let i=0; i<total; i++) {
+    frames.push(JSON.stringify({ v:1, t:total, i:i, n:safe, d:b64.substring(i*CHUNK,(i+1)*CHUNK) }));
+  }
+
+  // UI
+  document.getElementById('send-setup').classList.add('hidden');
+  document.getElementById('send-panel').classList.remove('hidden');
+
+  const sz = size<1024 ? `${size}B` : size<1048576 ? `${(size/1024).toFixed(1)}KB` : `${(size/1048576).toFixed(1)}MB`;
+  document.getElementById('file-meta').textContent = `${name}  ·  ${sz}  ·  ${total} frames`;
+  document.getElementById('tot-f').textContent = pad(total);
+
+  // QR init
+  fi = 0;
+  const out = document.getElementById('qr-out');
+  out.innerHTML = '';
+  qr = new QRCode(out, { text:frames[0], width:QSZ, height:QSZ, correctLevel:QRCode.CorrectLevel.L });
+  syncSendUI();
+  startPlay();
+}
+
+function showFrame(idx) {
+  if (!qr || !frames.length) return;
+  try { qr.makeCode(frames[idx]); }
+  catch {
+    const o = document.getElementById('qr-out');
+    o.innerHTML='';
+    qr = new QRCode(o, { text:frames[idx], width:QSZ, height:QSZ, correctLevel:QRCode.CorrectLevel.L });
+  }
+  syncSendUI();
+}
+
+function syncSendUI() {
+  document.getElementById('cur-f').textContent = pad(fi+1);
+  document.getElementById('send-prog').style.width = ((fi+1)/frames.length*100)+'%';
+}
+
+function pad(n) { return String(n).padStart(4,'0'); }
+
+// ====================================================
+// SENDER — PLAYBACK
+// ====================================================
+function startPlay() {
+  if (playing) return;
+  playing = true;
+  document.getElementById('play-btn').textContent = '⏸ Pause';
+  document.getElementById('qr-wrap').classList.add('pulsing');
+  timer = setInterval(()=>{ fi=(fi+1)%frames.length; showFrame(fi); }, spd);
+}
+function stopPlay() {
+  playing = false;
+  document.getElementById('play-btn').textContent = '▶ Play';
+  document.getElementById('qr-wrap').classList.remove('pulsing');
+  if (timer) { clearInterval(timer); timer=null; }
+}
+function togglePlay() { playing ? stopPlay() : startPlay(); }
+function nextF() { stopPlay(); fi=(fi+1)%frames.length; showFrame(fi); }
+function prevF() { stopPlay(); fi=(fi-1+frames.length)%frames.length; showFrame(fi); }
+function resetPlay() { stopPlay(); fi=0; showFrame(0); startPlay(); }
+function changeFile() {
+  stopPlay(); frames=[];
+  inp.value='';
+  document.getElementById('send-setup').classList.remove('hidden');
+  document.getElementById('send-panel').classList.add('hidden');
+}
+
+document.getElementById('sp-range').addEventListener('input', function() {
+  spd = +this.value;
+  document.getElementById('sp-val').textContent = spd+'ms';
+  if (playing) { stopPlay(); startPlay(); }
+});
+
+// ====================================================
+// RECEIVER — CAMERA
+// ====================================================
+async function startCam() {
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }
+    });
+    const v = document.getElementById('recv-video');
+    v.srcObject = camStream;
+    await v.play();
+    scanLoop();
+  } catch(e) {
+    document.getElementById('recv-status').innerHTML =
+      `⚠️ Camera blocked: ${e.message}<br><small>Allow camera permission, or download & open locally.</small>`;
+  }
+}
+
+function stopCam() {
+  if (rafId) { cancelAnimationFrame(rafId); rafId=null; }
+  if (camStream) { camStream.getTracks().forEach(t=>t.stop()); camStream=null; }
+}
+
+function scanLoop() {
+  const v   = document.getElementById('recv-video');
+  const c   = document.getElementById('scan-canvas');
+  const ctx = c.getContext('2d', {willReadFrequently:true});
+
+  (function tick() {
+    if (v.readyState >= v.HAVE_ENOUGH_DATA && v.videoWidth > 0) {
+      c.width=v.videoWidth; c.height=v.videoHeight;
+      ctx.drawImage(v, 0, 0);
+      const img  = ctx.getImageData(0,0,c.width,c.height);
+      const code = jsQR(img.data, img.width, img.height, {inversionAttempts:'dontInvert'});
+      if (code) {
+        if (code.data !== lastQR) { lastQR=code.data; onQR(code.data); }
+      } else { lastQR=null; }
+    }
+    rafId = requestAnimationFrame(tick);
+  })();
+}
+
+// ====================================================
+// RECEIVER — PACKET PROCESSING
+// ====================================================
+function onQR(raw) {
+  let p;
+  try { p=JSON.parse(raw); } catch { return; }
+  if (!p || p.v!==1 || typeof p.t!=='number' || typeof p.i!=='number' || typeof p.d!=='string') return;
+  if (p.i<0 || p.i>=p.t) return;
+
+  if (!rxN) {
+    rxN    = p.t;
+    rxName = p.n || 'received_file';
+    buildGrid(rxN);
+  }
+
+  if (rxd[p.i] !== undefined) return;   // already have this frame
+  rxd[p.i] = p.d;
+
+  const cell = document.getElementById('gc'+p.i);
+  if (cell) cell.classList.add('on');
+
+  updateRecvUI();
+}
+
+function buildGrid(n) {
+  const g = document.getElementById('chunk-grid');
+  g.innerHTML = '';
+  if (n > 500) {
+    g.style.cssText = 'color:var(--muted);font-size:.68rem;font-family:var(--mono);max-height:none';
+    g.textContent = '(grid hidden for large transfers — progress bar shows status)';
+    return;
+  }
+  for (let i=0; i<n; i++) {
+    const d=document.createElement('div');
+    d.className='gc'; d.id='gc'+i;
+    g.appendChild(d);
+  }
+}
+
+function updateRecvUI() {
+  const got  = Object.keys(rxd).length;
+  const pct  = (got/rxN*100).toFixed(1);
+  document.getElementById('recv-prog').style.width = pct+'%';
+  document.getElementById('recv-ctr').textContent  = `${got} / ${rxN} frames  (${pct}%)`;
+
+  if (got===rxN && !rxDone) {
+    rxDone = true;
+    document.getElementById('recv-status').textContent = `✅ Transfer complete — ${rxName}`;
+    document.getElementById('recv-actions').classList.remove('hidden');
+    document.getElementById('miss-note').classList.add('hidden');
+  } else if (got<rxN) {
+    document.getElementById('recv-status').textContent = `📡 Receiving ${rxName}…`;
+    if (got > 3) {
+      const miss = rxN-got;
+      document.getElementById('miss-note').classList.remove('hidden');
+      document.getElementById('miss-note').textContent =
+        `${miss} frame${miss!==1?'s':''} still missing — keep sender looping`;
+    }
+  }
+}
+
+function dlFile() {
+  let b64='';
+  for (let i=0; i<rxN; i++) b64 += rxd[i]||'';
+  try {
+    const bin=atob(b64), buf=new Uint8Array(bin.length);
+    for (let i=0; i<bin.length; i++) buf[i]=bin.charCodeAt(i);
+    const url=URL.createObjectURL(new Blob([buf]));
+    const a=document.createElement('a'); a.href=url; a.download=rxName; a.click();
+    URL.revokeObjectURL(url);
+  } catch(e) { alert('Download failed: '+e.message); }
+}
+
+function clearRecv() {
+  rxd={}; rxN=0; rxName=''; rxDone=false; lastQR=null;
+  document.getElementById('recv-status').textContent='📡 Point camera at the QR stream on the other screen';
+  document.getElementById('recv-prog').style.width='0%';
+  document.getElementById('recv-ctr').textContent='';
+  document.getElementById('chunk-grid').innerHTML='';
+  document.getElementById('chunk-grid').style.cssText='';
+  document.getElementById('recv-actions').classList.add('hidden');
+  document.getElementById('miss-note').classList.add('hidden');
+}
+</script>
+</body>
+</html>
