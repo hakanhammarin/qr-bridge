@@ -81,7 +81,12 @@
     <div class="bar"><i id="prog" style="width:0"></i></div>
     <div class="blocks" id="blocks"></div>
 
+    <div id="diag" class="note" style="margin-top:0;display:none"></div>
+
     <div class="row" style="margin-top:12px">
+      <select id="camsel" style="flex:1 0 100%" title="Camera"><option>Default camera</option></select>
+    </div>
+    <div class="row" style="margin-top:8px">
       <button id="start">Start capture</button>
       <select id="gridsel" title="Grid layout">
         <option value="auto" selected>Grid: auto</option>
@@ -129,7 +134,7 @@ function newSession() {
     manifest: null, decoders: [], blobs: [], doneBlocks: 0,
     gx: 1, gy: 1,                    /* 1x1 until the manifest says otherwise */
     seen: 0, used: 0, attempts: 0, hits: 0,
-    rateWin: [], pxWin: [], tilt: 0, modules: 133, test: null,
+    rateWin: [], pxWin: [], diag: [], tilt: 0, modules: 133, test: null,
     startedAt: 0, finished: false,
     busy: 0, nextId: 0, jobs: new Map(), tileHit: []
   };
@@ -142,8 +147,55 @@ const grab = document.createElement('canvas');
 const gctx = grab.getContext('2d', {willReadFrequently: true});
 const small = document.createElement('canvas');
 const sctx = small.getContext('2d', {willReadFrequently: true});
+const tiny = document.createElement('canvas'); tiny.width = 320; tiny.height = 180;
+const tctx = tiny.getContext('2d', {willReadFrequently: true});
 
-async function startCapture() {
+/* ---------- optical diagnostics ----------
+   When a *static* code reads only sometimes, the cause is almost never the
+   protocol — it is the optics moving underneath you. The trick is picking
+   statistics that separate the candidates instead of all reacting to each
+   other, which took two attempts:
+
+     sharpness  gradient energy. Hunting autofocus swings this while the scene
+                is still.
+     mean       average luminance. Blur is a normalised convolution, so it
+                leaves the mean alone — which makes mean drift a clean signal
+                for backlight PWM and auto-exposure hunting, uncontaminated by
+                focus. (Contrast spread does NOT work here: defocus crushes it
+                too, and the two causes become indistinguishable.)
+     balance    light pixels versus dark pixels. A well-exposed QR is roughly
+                half and half and pins the histogram at both ends by design —
+                so raw "clipping" says nothing. An imbalance does: glare and
+                veiling flare lift the blacks, and blown highlights bloom white
+                into the dark modules, both skewing this away from 0.5.
+     contrast   absolute separation, for the plainly-too-flat case.
+
+   Computed on a 320x180 copy so the cost is negligible next to jsQR. */
+function diagnose() {
+  tctx.drawImage(grab, 0, 0, tiny.width, tiny.height);
+  const d = tctx.getImageData(0, 0, tiny.width, tiny.height).data;
+  const W = tiny.width, H = tiny.height;
+  const lum = new Float32Array(W * H);
+  let dark = 0, light = 0, sum = 0;
+  for (let i = 0, p = 0; i < lum.length; i++, p += 4) {
+    const v = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+    lum[i] = v; sum += v;
+    if (v <= 40) dark++; else if (v >= 215) light++;
+  }
+  let grad = 0;
+  for (let y = 1; y < H-1; y++) for (let x = 1; x < W-1; x++) {
+    const i = y*W + x;
+    const gx = lum[i+1] - lum[i-1], gy = lum[i+W] - lum[i-W];
+    grad += gx*gx + gy*gy;
+  }
+  const sharp = Math.sqrt(grad / ((W-2)*(H-2)));
+  const sorted = Float32Array.from(lum).sort();
+  const p5 = sorted[(sorted.length*0.05)|0], p95 = sorted[(sorted.length*0.95)|0];
+  return {sharp, contrast: p95 - p5, mean: sum / lum.length,
+          balance: (light + dark) > 0 ? light / (light + dark) : 0.5};
+}
+
+async function startCapture(deviceId) {
   if (!window.isSecureContext || !navigator.mediaDevices) {
     $('tip').innerHTML = '<span class="tag b">camera unavailable</span> This page must be served over ' +
       '<b>https</b> (or localhost). Opening the .html file directly from Files or AirDrop gives it a ' +
@@ -152,8 +204,10 @@ async function startCapture() {
     return;
   }
   S = newSession();
-  const want = {video: {facingMode: {ideal: 'environment'},
-    width: {ideal: 3840}, height: {ideal: 2160}, frameRate: {ideal: 60}}};
+  const want = {video: deviceId
+    ? {deviceId: {exact: deviceId}, width: {ideal: 3840}, height: {ideal: 2160}, frameRate: {ideal: 60}}
+    : {facingMode: {ideal: 'environment'},
+       width: {ideal: 3840}, height: {ideal: 2160}, frameRate: {ideal: 60}}};
   try {
     stream = await navigator.mediaDevices.getUserMedia(want);
   } catch (e) {
@@ -165,6 +219,7 @@ async function startCapture() {
   const t = stream.getVideoTracks()[0].getSettings();
   $('hres').textContent = `${t.width}×${t.height} @${Math.round(t.frameRate||0)}`;
   if (t.width < 1900) warnRes();
+  listCameras(t.deviceId);
 
   workers = [];
   for (let i = 0; i < POOL; i++) {
@@ -178,6 +233,34 @@ async function startCapture() {
   pump();
   clearInterval(statsTimer);
   statsTimer = setInterval(refreshStats, 500);
+}
+
+/* An iPhone exposes several rear cameras, and `facingMode: environment` does
+   not reliably give you the 1x main one — it can hand back the ultra-wide, or a
+   virtual device that switches lenses on its own (including into macro when it
+   thinks you are close). Either behaviour reads as "sometimes it works". Labels
+   only appear once camera permission has been granted, so this runs after the
+   first successful getUserMedia. */
+async function listCameras(currentId) {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === 'videoinput');
+    if (devs.length < 2) return;
+    const sel = $('camsel');
+    sel.innerHTML = '';
+    for (const d of devs) {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || `camera ${sel.length + 1}`;
+      if (d.deviceId === currentId) o.selected = true;
+      sel.appendChild(o);
+    }
+    const back = [...sel.options].find(o => /back|rear/i.test(o.textContent) && !/ultra|wide angle|tele/i.test(o.textContent));
+    if (back && !currentId) back.selected = true;
+    $('tip').innerHTML = 'If reads are intermittent, try a different camera here. On an iPhone the ' +
+      '<b>back dual/triple wide</b> entry is the 1× main lens; the ultra-wide resolves far less detail ' +
+      'and the auto-switching virtual device can jump to macro without warning.';
+  } catch (e) {}
 }
 
 function warnRes() {
@@ -212,6 +295,10 @@ function pump() {
   if (grab.width !== VW) { grab.width = VW; grab.height = VH; }
   gctx.drawImage(video, 0, 0);
   S.seen++;
+  if (S.seen % 4 === 0) {
+    const q = diagnose();
+    S.diag.push(q); if (S.diag.length > 40) S.diag.shift();
+  }
 
   /* Before the manifest arrives the whole frame is one search area, and jsQR
      over a full 1080p/4K frame costs hundreds of milliseconds — slow enough
@@ -405,6 +492,49 @@ function paintBlocks() {
   }
 }
 
+/* Turn the diagnostic history into a named verdict. Each candidate cause has a
+   distinct signature, so the page can say which one it is rather than listing
+   everything that might be wrong. */
+function verdict() {
+  if (S.diag.length < 6) return null;
+  const avg = a => a.reduce((x,y)=>x+y,0)/a.length;
+  const sh = S.diag.map(d => d.sharp), mn = S.diag.map(d => d.mean);
+  const shAvg = avg(sh), meanAvg = avg(mn);
+  const coAvg = avg(S.diag.map(d => d.contrast));
+  const balAvg = avg(S.diag.map(d => d.balance));
+  /* spread of each statistic while nothing in the scene is moving */
+  const shSpread = shAvg > 0 ? (Math.max(...sh) - Math.min(...sh)) / shAvg : 0;
+  const meanSpread = (Math.max(...mn) - Math.min(...mn)) / 255;
+
+  const out = {shAvg, coAvg, meanAvg, balAvg, shSpread, meanSpread, causes: []};
+  if (shSpread > 0.45)
+    out.causes.push(['b', 'autofocus hunting',
+      'Sharpness is swinging ' + (shSpread*100).toFixed(0) + '% between samples on a still scene. ' +
+      'Safari cannot lock focus, so shoot from 40–60 cm where depth of field covers the panel. ' +
+      'Never closer than ~20 cm — the phone switches to macro on the ultra-wide lens.']);
+  if (meanSpread > 0.10)
+    out.causes.push(['b', 'exposure or backlight flicker',
+      'Scene brightness is drifting ' + (meanSpread*100).toFixed(0) + '% of full scale. Set the monitor ' +
+      'to 100% brightness — below that most panels dim by PWM, which beats against the rolling shutter. ' +
+      'Turn off adaptive/ambient brightness on both the monitor and the phone.']);
+  if (balAvg > 0.72)
+    out.causes.push(['w', 'blacks are washed out',
+      'Light pixels outnumber dark ones ' + (balAvg*100).toFixed(0) + ':' + ((1-balAvg)*100).toFixed(0) + '. ' +
+      'That is glare or overexposure lifting the dark modules — reposition to kill the reflection, or ' +
+      'bring the monitor brightness down a step.']);
+  else if (balAvg < 0.28)
+    out.causes.push(['w', 'image is too dark',
+      'Dark pixels dominate. Raise the monitor brightness or fill more of the frame with the code.']);
+  if (coAvg < 60)
+    out.causes.push(['b', 'low contrast',
+      'Only ' + coAvg.toFixed(0) + ' levels between dark and light. Check for glare, a reflection, or ' +
+      'a filter/case over the lens.']);
+  if (shAvg < 8)
+    out.causes.push(['b', 'image is soft',
+      'Very little edge energy — either badly out of focus, or the code is far too small in frame.']);
+  return out;
+}
+
 const medianPx = () => {
   if (!S.pxWin.length) return 0;
   const v = [...S.pxWin].sort((a,b) => a-b);
@@ -421,6 +551,30 @@ function refreshStats() {
   const hitPct = S.attempts ? 100*S.hits/S.attempts : 0;
   $('s-rate').textContent = rate.toFixed(0);
   $('s-hit').textContent = S.attempts ? hitPct.toFixed(0)+'%' : '—';
+
+  /* ---- optics panel, always on ---- */
+  const V = verdict();
+  if (V) {
+    const bar = (label, val, frac, unit) =>
+      `<div style="display:flex;align-items:center;gap:8px;margin:3px 0">
+         <span style="width:74px;color:var(--dim);font-size:11px">${label}</span>
+         <span style="flex:1;height:5px;background:#0e1218;border-radius:3px;overflow:hidden">
+           <i style="display:block;height:100%;width:${Math.min(100,frac*100).toFixed(0)}%;
+              background:${frac>=.6?'var(--good)':frac>=.35?'var(--warn)':'var(--bad)'}"></i></span>
+         <span style="width:52px;text-align:right;font-family:var(--mono);font-size:11px">${val}${unit}</span>
+       </div>`;
+    $('diag').style.display = 'block';
+    $('diag').innerHTML =
+      bar('sharpness', V.shAvg.toFixed(0), Math.min(1, V.shAvg/35), '') +
+      bar('contrast', V.coAvg.toFixed(0), V.coAvg/200, '') +
+      bar('focus hold', ((1-Math.min(1,V.shSpread))*100).toFixed(0), 1-Math.min(1,V.shSpread/0.6), '%') +
+      bar('exposure hold', ((1-Math.min(1,V.meanSpread*5))*100).toFixed(0), 1-Math.min(1,V.meanSpread/0.2), '%') +
+      bar('black/white', (V.balAvg*100).toFixed(0), 1-Math.min(1,Math.abs(V.balAvg-0.5)/0.3), '%') +
+      (V.causes.length
+        ? V.causes.map(c => `<div style="margin-top:9px"><span class="tag ${c[0]}">${c[1]}</span><br>${c[2]}</div>`).join('')
+        : '<div style="margin-top:8px"><span class="tag g">optics look fine</span> If reads are still ' +
+          'intermittent the codes are too dense — drop to a lower QR version or a smaller grid.</div>');
+  }
 
   /* ---- link test readout ---- */
   if (S.test) {
@@ -472,6 +626,12 @@ function refreshStats() {
 
 $('start').onclick = startCapture;
 $('stopb').onclick = stopCapture;
+$('camsel').onchange = async () => {
+  if (!running) return;
+  stopCapture();
+  await new Promise(r => setTimeout(r, 250));
+  startCapture($('camsel').value);
+};
 $('gridsel').onchange = e => {
   if (!S) return;
   if (e.target.value !== 'auto') {
@@ -482,6 +642,10 @@ $('gridsel').onchange = e => {
 /* Hooks for the offline test harness: they drive the same ingest path a
    camera read would, with no camera attached. */
 window.__newSession = () => (S = newSession());
+window.__grab = grab;
+window.__diagnose = diagnose;
+window.__verdict = verdict;
+window.__pushDiag = q => S.diag.push(q);
 window.__ingest = text => ingest(text);
 window.__S = () => S;
 

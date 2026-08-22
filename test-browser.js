@@ -166,14 +166,15 @@ const ok = (c, m) => { if (!c) { fails++; console.log('  FAIL ' + m); } else con
     const cv = document.getElementById('cv'), c = cv.getContext('2d');
     /* the region must be letterboxed: corners black, centre white */
     const corner = c.getImageData(2, 2, 1, 1).data;
-    const mid = c.getImageData(cv.width >> 1, 4, 1, 1).data;
+    const mid = c.getImageData(cv.width >> 1, 10, 1, 1).data;
     return {hud: document.getElementById('h-block').textContent,
-            cornerDark: corner[0] < 40, midLight: mid[0] > 200,
+            corner: corner[0], mid: mid[0],
             frames: document.getElementById('h-frame').textContent};
   });
   ok(lt.hud === 'LINK TEST', 'link test mode runs without a file selected');
-  ok(lt.cornerDark && lt.midLight,
-     'transmit region is letterboxed — black outside, white code area inside');
+  ok(lt.corner > 90 && lt.corner < 170 && lt.mid > 200,
+     `transmit region is letterboxed with a NEUTRAL surround (outside ${lt.corner}, inside ${lt.mid}) — ` +
+     'a black surround would drag auto-exposure toward the bright block');
   await uw.keyboard.press('Escape');
   await uw.close();
 
@@ -226,6 +227,62 @@ const ok = (c, m) => { if (!c) { fails++; console.log('  FAIL ' + m); } else con
   ok(rxResult.synced, 'receiver syncs on a manifest packet and builds its decoders');
   ok(rxResult.complete, `receiver completed the block from ${rxResult.sent} packets (K=${rxResult.K})`);
   ok(rxResult.match, 'receiver reassembled the block byte-for-byte through its own ingest path');
+
+  /* ---- optical diagnostics must name the right fault ----
+     Synthesise frames with one known defect each and check the verdict picks it
+     out. A diagnostic that fires on everything is worse than none at all. */
+  const diagRes = await rx.evaluate(() => {
+    const g = window.__grab, c = g.getContext('2d');
+    g.width = 640; g.height = 360;
+
+    /* Paint a black/white grid — a stand-in for a well-exposed code — then
+       apply one physically-motivated defect: blur (focus), offset (exposure
+       or backlight level), lift (glare raising the blacks), gain (contrast). */
+    const paint = ({blur = 0, offset = 0, lift = 0, gain = 1}) => {
+      c.filter = 'none';
+      c.fillStyle = '#7f7f7f'; c.fillRect(0, 0, 640, 360);
+      c.filter = blur ? `blur(${blur}px)` : 'none';
+      for (let y = 0; y < 360; y += 16) for (let x = 0; x < 640; x += 16) {
+        const on = ((x/16 + y/16) % 2) === 0;
+        let v = on ? 255 : lift;
+        v = (v - 128) * gain + 128 + offset;
+        v = Math.max(0, Math.min(255, v));
+        c.fillStyle = `rgb(${v},${v},${v})`;
+        c.fillRect(x, y, 16, 16);
+      }
+      c.filter = 'none';
+    };
+
+    const run = frames => {
+      window.__newSession();
+      for (const f of frames) { paint(f); window.__pushDiag(window.__diagnose()); }
+      const v = window.__verdict();
+      return {causes: v ? v.causes.map(x => x[1]) : []};
+    };
+
+    const good = {};
+    const alt = (a, b) => [a,b,a,b,a,b,a,b,a,b];
+
+    return {
+      clean:   run(Array(10).fill(good)),
+      hunting: run(alt({blur: 0}, {blur: 6})),
+      flicker: run(alt({offset: -55}, {offset: 55})),
+      glare:   run(Array(10).fill({lift: 150})),
+      flat:    run(Array(10).fill({gain: 0.15}))
+    };
+  });
+
+  const only = (r, name) => r.causes.length === 1 && r.causes[0] === name;
+  ok(diagRes.clean.causes.length === 0,
+     `a steady, well-exposed capture raises no fault (got: ${diagRes.clean.causes.join(', ') || 'none'})`);
+  ok(only(diagRes.hunting, 'autofocus hunting'),
+     `alternating focus is diagnosed as autofocus hunting, and nothing else (got: ${diagRes.hunting.causes.join(', ')})`);
+  ok(only(diagRes.flicker, 'exposure or backlight flicker'),
+     `alternating brightness is diagnosed as exposure flicker, and nothing else (got: ${diagRes.flicker.causes.join(', ')})`);
+  ok(diagRes.glare.causes.includes('blacks are washed out'),
+     `lifted blacks are diagnosed as glare (got: ${diagRes.glare.causes.join(', ')})`);
+  ok(diagRes.flat.causes.includes('low contrast'),
+     `a flat image is diagnosed as low contrast (got: ${diagRes.flat.causes.join(', ')})`);
 
   await browser.close();
   console.log(fails === 0 ? '\nALL BROWSER TESTS PASSED' : `\n${fails} FAILURE(S)`);

@@ -82,6 +82,9 @@
       <div>
         <label for="ver">QR version</label>
         <select id="ver">
+          <option value="10">10 — 57 modules (beacon / diagnosis)</option>
+          <option value="15">15 — 77 modules (very forgiving)</option>
+          <option value="20">20 — 97 modules (forgiving)</option>
           <option value="27" selected>27 — 125 modules (best all-round)</option>
           <option value="33">33 — 149 modules (needs 4K)</option>
           <option value="40">40 — 177 modules (decodes poorly)</option>
@@ -2776,7 +2779,9 @@ const $ = id => document.getElementById(id);
 
 /* ---------- capacity table: alphanumeric chars per (version, EC) ---------- */
 const ALNUM_CAP = {
-  27:{L:2132,M:1637,Q:1179}, 33:{L:3009,M:2369,Q:1663}, 40:{L:4296,M:3391,Q:2420}
+   6:{L:195, M:154, Q:108},  10:{L:395, M:311, Q:221},  15:{L:758, M:600, Q:426},
+  20:{L:1249,M:970, Q:702},  27:{L:2132,M:1637,Q:1172},
+  33:{L:3009,M:2369,Q:1700}, 40:{L:4296,M:3391,Q:2420}
 };
 const MODULES = v => 4*v + 17;
 const MAX_BLOCK = 4 << 20;           /* 4 MiB — keeps LT overhead ~1.15x, memory bounded */
@@ -2873,7 +2878,7 @@ function geometry(ver, gx, gy) {
    the fastest, and the most reliable one that still reads above 90%. */
 function optimize() {
   const cands = [];
-  for (const ver of [27, 33, 40])
+  for (const ver of [15, 20, 27, 33, 40])
     for (let gx = 1; gx <= 6; gx++)
       for (let gy = 1; gy <= 4; gy++) {
         const g = geometry(ver, gx, gy);
@@ -3240,11 +3245,17 @@ function regionOf(W, H) {
 function blit(slot) {
   const W = cv.width, H = cv.height;
   const R = regionOf(W, H);
-  /* Everything outside the transmit region is black: it gives the operator a
-     hard edge to frame against, and keeps stray desktop light out of the
-     camera's exposure metering. */
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  /* Mid-grey surround, not black. A black surround around a white block swings
+     the phone's auto-exposure hard toward the bright area, which blooms white
+     into the dark modules and thins them — on a marginal link that alone turns
+     a steady read into an intermittent one. Grey keeps average scene luminance
+     close to the code's own, so exposure settles and stays put. A thin dark
+     rule still gives a hard edge to frame against. */
+  ctx.fillStyle = '#7f7f7f'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#fff'; ctx.fillRect(R.x, R.y, R.w, R.h);
+  ctx.strokeStyle = '#000'; ctx.lineWidth = Math.max(2, Math.round(R.h * 0.004));
+  ctx.strokeRect(R.x + ctx.lineWidth/2, R.y + ctx.lineWidth/2,
+                 R.w - ctx.lineWidth, R.h - ctx.lineWidth);
   ctx.imageSmoothingEnabled = false;
   const gx = slot.gx, gy = slot.gy;
   const cellW = Math.floor(R.w / gx), cellH = Math.floor(R.h / gy);

@@ -223,7 +223,54 @@ with black outside it as a framing edge. On 5120×1440 that lifts 2×2 v27 from
 for your panel and camera and reports the most reliable and the fastest option —
 on a 5120×1440 panel with a 1080p camera it picks **2×1** at 6.0 px/module.
 
-**4. Give it a moment to sync.** The receiver cannot decode anything until it has
+**4. If the link test works only *sometimes*.** A link-test code is static, so
+intermittent reads cannot be a density problem — the optics are moving underneath
+you. The receiver now measures this directly and names the cause, using statistics
+chosen so they do not confound each other:
+
+| Reading | What moves it | What it means |
+|---|---|---|
+| **sharpness** | gradient energy | swings on a still scene ⇒ autofocus hunting |
+| **exposure hold** | mean luminance | drift ⇒ backlight PWM or auto-exposure |
+| **black/white** | light vs dark pixel counts | skewed ⇒ glare lifting the blacks |
+| **contrast** | absolute separation | plainly too flat |
+
+Mean luminance rather than contrast spread for exposure, because *defocus also
+crushes contrast* — the first version of this blamed exposure for every focus
+problem. Blur is a normalised convolution and leaves the mean alone, which makes
+the two separable. Likewise "clipping" is useless here: a well-exposed QR pins the
+histogram at both ends by design, so only the *imbalance* is diagnostic.
+
+The three real causes, in the order they bite:
+
+- **Wrong lens.** `facingMode: environment` does not reliably give the 1× main
+  camera on an iPhone — it can hand back the ultra-wide, or a virtual device that
+  switches lenses on its own, including into macro when it thinks you are close.
+  There is now a **camera picker**; choose the back wide entry, not ultra-wide.
+- **Autofocus hunting.** Safari cannot lock focus (`focusMode` is unsupported on
+  iOS), so the only control you have is distance. Shoot from 40–60 cm, where depth
+  of field covers the panel. Never closer than ~20 cm.
+- **Backlight PWM.** Below 100% brightness most panels dim by pulse-width
+  modulation, which beats against the rolling shutter and bands the image
+  periodically. Run the monitor at 100% and turn off adaptive brightness.
+
+Two things changed in the sender for the same reason. The surround is now **mid
+grey, not black** — a black frame around a white block drags auto-exposure toward
+the bright area, blooming white into the dark modules and thinning them. And the
+receiver now retries any failed decode on a **contrast-stretched copy**, which in
+testing took jsQR from 36/72 to **72/72** under glare and panel dimming:
+
+| Condition | raw jsQR | with retry |
+|---|---|---|
+| normal | 12/12 | 12/12 |
+| heavy glare (blacks lifted to 150) | 0/12 | **12/12** |
+| dimmed + glare | 0/12 | **12/12** |
+| very flat (gain 0.18) | 0/12 | **12/12** |
+
+Versions **10, 15 and 20** are now selectable too. Version 10 is 57 modules — use
+it as a beacon to prove the link works at all, then walk the density up.
+
+**5. Give it a moment to sync.** The receiver cannot decode anything until it has
 the manifest. Transmission now opens with a 2-second burst of full-screen manifest
 frames and repeats a 4-frame burst every 10 seconds, and the receiver scans a
 downscaled frame while searching, so sync is effectively instant if the receiver is
@@ -239,7 +286,8 @@ Set up in this order:
    area, and hit **Optimise layout**. Take the reliable suggestion first.
 2. Mount the phone and frame the *white block*, not the whole screen. Run the
    **Link test** and adjust until px/module is comfortable.
-3. Open the receiver, **start capture first**, tap once to lock focus.
+3. Open the receiver, pick the **back wide** camera (not ultra-wide), and start
+   capture first. Watch the optics bars settle before starting the sender.
 4. Choose the file and run **Benchmark encoder**. QR generation costs
    tens of milliseconds per code; the sender needs `fps × cells` codes per second
    sustained across its worker pool. If the benchmark says "too slow", drop the
@@ -257,7 +305,8 @@ is the number to watch: below ~50% the redundancy setting is being outrun and th
 transfer will need extra sweeps.
 
 Avoid: auto-brightness, True Tone, Night Shift, screen savers, and anything that
-can raise a notification over the sender's display.
+can raise a notification over the sender's display. Run the monitor at 100%
+brightness — anything less usually means PWM dimming.
 
 ---
 
@@ -281,7 +330,9 @@ unsubstituted template token.
 node test-core.js        # base45 RFC vectors, CRC32, fountain recovery, two-sweep
 node test-qr-roundtrip.js # bytes -> QR -> pixels -> jsQR -> bytes, all versions
 ./run-e2e.sh             # full optical simulation across 10 layout scenarios
-node test-browser.js     # built pages in headless Chromium, live canvas decoded
+node test-browser.js     # built pages in headless Chromium, live canvas decoded,
+                        #   plus synthetic optical faults vs the diagnostic verdict
+node test-stretch.js     # does the contrast-stretch retry actually recover frames
 ```
 
 `test-e2e.js` is where the read-rate table above comes from. It renders through the
