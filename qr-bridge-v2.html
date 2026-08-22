@@ -100,9 +100,13 @@
         <select id="grid">
           <option value="1x1">1 × 1 — single code</option>
           <option value="2x1">2 × 1</option>
-          <option value="2x2" selected>2 × 2 — recommended</option>
-          <option value="3x2">3 × 2 — needs 4K capture</option>
-          <option value="3x3">3 × 3 — needs 4K capture</option>
+          <option value="3x1">3 × 1</option>
+          <option value="4x1">4 × 1</option>
+          <option value="2x2" selected>2 × 2</option>
+          <option value="3x2">3 × 2</option>
+          <option value="4x2">4 × 2</option>
+          <option value="3x3">3 × 3</option>
+          <option value="4x3">4 × 3</option>
         </select>
       </div>
       <div>
@@ -124,6 +128,31 @@
         </select>
       </div>
       <div>
+        <label for="area">Transmit area</label>
+        <select id="area">
+          <option value="16:9" selected>16:9 centred block</option>
+          <option value="4:3">4:3 centred block</option>
+          <option value="1:1">Square centred block</option>
+          <option value="full">Fill the whole screen</option>
+        </select>
+      </div>
+      <div>
+        <label for="cam">Receiver camera</label>
+        <select id="cam">
+          <option value="1920x1080" selected>1080p (Safari on iOS)</option>
+          <option value="3840x2160">4K (native app)</option>
+          <option value="1280x720">720p</option>
+        </select>
+      </div>
+      <div>
+        <label>Panel resolution</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="scrw" type="number" value="1920" style="width:100%;background:#0e1218;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px;font-family:inherit">
+          <span style="color:var(--dim)">×</span>
+          <input id="scrh" type="number" value="1080" style="width:100%;background:#0e1218;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px;font-family:inherit">
+        </div>
+      </div>
+      <div>
         <label>Redundancy <b id="rlabel" style="color:var(--ink)">1.45×</b></label>
         <input type="range" id="red" min="105" max="250" step="5" value="145">
         <div class="note" style="margin-top:4px">Tolerates <b id="losstol" style="color:var(--ink)">—</b> frame loss in a single sweep</div>
@@ -131,7 +160,10 @@
     </div>
     <div class="note">
       Frame timing is expressed in whole display refreshes, not milliseconds — a QR that changes mid-refresh
-      produces a torn frame the camera cannot decode. At 60 Hz, 5 refreshes = 83.3 ms = 12 fps.
+      produces a torn frame the camera cannot decode. At 60 Hz, 5 refreshes = 83.3 ms = 12 fps.<br><br>
+      <b>Transmit area matters more than anything else on a wide panel.</b> Codes spread across a 32:9 screen
+      force the phone to letterbox, throwing away two thirds of the sensor. Painting into a centred block whose
+      aspect matches the camera lets the operator fill the frame with codes instead of black bars.
     </div>
   </div>
 
@@ -140,9 +172,12 @@
     <table id="plan"><tr><td>Select a file to see the transfer plan</td><td></td></tr></table>
     <div class="row">
       <button id="go" disabled>Start transmission</button>
+      <button id="opt" class="ghost">Optimise layout</button>
+      <button id="linktest" class="ghost">Link test</button>
       <button id="calib" class="ghost">Benchmark encoder</button>
-      <span id="calibout" class="note" style="margin:0"></span>
     </div>
+    <div class="row"><span id="calibout" class="note" style="margin:0"></span></div>
+    <div class="note" id="optout"></div>
     <div class="note" id="warn"></div>
   </div>
 
@@ -2745,7 +2780,15 @@ const ALNUM_CAP = {
 };
 const MODULES = v => 4*v + 17;
 const MAX_BLOCK = 4 << 20;           /* 4 MiB — keeps LT overhead ~1.15x, memory bounded */
-const MANIFEST_EVERY = 240;          /* re-send the manifest this often, in frames */
+/* Manifest scheduling. The receiver cannot decode anything until it has the
+   manifest, and before it syncs it is scanning the whole frame rather than
+   tiles — which is slow, so it samples only a few times a second. A single
+   manifest frame every 240 frames was catchable maybe a third of the time,
+   making sync take a minute or worse. Sending a burst of consecutive frames
+   makes it near-certain the receiver lands on one. */
+const MANIFEST_EVERY = 120;          /* frames between bursts */
+const MANIFEST_BURST = 4;            /* consecutive manifest frames per burst */
+const MANIFEST_OPENING = 24;         /* frames of manifest before any data at all */
 
 let file = null, plan = null;
 
@@ -2776,24 +2819,76 @@ function computePlan() {
   const grossRate = symbolSize * cells * fps;
   const netRate = file.size / seconds;
 
-  /* Pixel budget. Modules are drawn at an INTEGER scale so each one lands on
-     a whole number of pixels — the fractional ideal overstates what actually
-     reaches the decoder, sometimes by 15%. Measure what is really drawn. */
-  const need = MODULES(ver) + 8;
-  const deliv = (W, H) => Math.max(1, Math.floor(Math.min(Math.floor(W/gx), Math.floor(H/gy)) / need));
-  const pxPerModule1080 = deliv(1920, 1080);
-  const pxPerModule4K   = deliv(3840, 2160);
-
-  const read1080 = estRead(pxPerModule1080, ver);
-  const read4K   = estRead(pxPerModule4K, ver);
+  const g = geometry(ver, gx, gy);
+  const read = estRead(g.pxPerModule, ver);
   /* Effective rate = gross throughput derated by how often a code actually
      decodes, then by the redundancy needed to cover that loss. */
   const effRate = r => r <= 0 ? 0 : grossRate / Math.max(R, 1.15 / Math.max(r, .01));
 
   return { ver, ec, gx, gy, cells, fpc, hz, fps, R, symbolSize, numBlocks, blockSize, K,
            packetsPerBlock, totalPackets, framesPerSweep, totalFrames, seconds,
-           grossRate, netRate, pxPerModule1080, pxPerModule4K, capChars,
-           read1080, read4K, eff1080: effRate(read1080), eff4K: effRate(read4K) };
+           grossRate, netRate, capChars, read, eff: effRate(read),
+           area: $('area').value, geo: g, pxPerModule: g.pxPerModule };
+}
+
+/* ---------- geometry ----------
+   What actually reaches the decoder is pixels per module AT THE SENSOR, and
+   that depends on three things the QR spec knows nothing about: the panel's
+   own resolution, how much of the panel the codes occupy, and how much of the
+   camera frame the codes occupy once the phone frames them.
+
+   On an ultrawide panel this is brutal. Codes spread across a 32:9 screen force
+   the phone to letterbox: two thirds of the sensor lands on nothing, and a
+   layout that computes to 4 px/module on paper delivers under 2. Painting into
+   a centred region whose aspect matches the camera fixes it, because then the
+   operator can fill the frame with codes instead of with black bars. */
+function geometry(ver, gx, gy) {
+  const SW = +$('scrw').value || 1920, SH = +$('scrh').value || 1080;
+  const cam = $('cam').value.split('x').map(Number);
+  const camW = cam[0], camH = cam[1];
+  const aspect = $('area').value === 'full' ? SW / SH
+               : $('area').value === '16:9' ? 16/9
+               : $('area').value === '4:3'  ? 4/3 : 1;
+
+  /* the region the codes are painted into, centred on the panel */
+  let rW, rH;
+  if (SW / SH > aspect) { rH = SH; rW = Math.round(SH * aspect); }
+  else                  { rW = SW; rH = Math.round(SW / aspect); }
+
+  const need = MODULES(ver) + 8;
+  const cellW = Math.floor(rW / gx), cellH = Math.floor(rH / gy);
+  const scale = Math.floor(Math.min(cellW, cellH) / need);   /* integer module size, in panel px */
+
+  /* The phone frames the REGION, so region width maps onto the camera's
+     usable width — whichever camera axis runs out first. */
+  const fill = Math.min(camW / rW, camH / rH);
+  const pxPerModule = scale > 0 ? scale * fill : 0;
+
+  return { SW, SH, camW, camH, rW, rH, scale, cellW, cellH, need,
+           pxPerModule: Math.round(pxPerModule * 100) / 100,
+           codePx: scale * need, fits: scale >= 1 };
+}
+
+/* Search every layout for this panel + camera and return the best two:
+   the fastest, and the most reliable one that still reads above 90%. */
+function optimize() {
+  const cands = [];
+  for (const ver of [27, 33, 40])
+    for (let gx = 1; gx <= 6; gx++)
+      for (let gy = 1; gy <= 4; gy++) {
+        const g = geometry(ver, gx, gy);
+        if (!g.fits) continue;
+        const read = estRead(g.pxPerModule, ver);
+        const capChars = ALNUM_CAP[ver][$('ec').value];
+        let sym = Math.floor(capChars/3)*2 - C.OVERHEAD; sym -= sym % 2;
+        const fps = (+$('hz').value) / (+$('fpc').value);
+        cands.push({ver, gx, gy, read, px: g.pxPerModule,
+                    eff: sym * gx * gy * fps * read / 1.15});
+      }
+  cands.sort((a, b) => b.eff - a.eff);
+  const fast = cands[0];
+  const safe = cands.filter(c => c.read >= 0.90)[0] || fast;
+  return {fast, safe};
 }
 
 /* Probability that a displayed code is successfully read, estimated from an
@@ -2838,33 +2933,35 @@ function render() {
   $('go').disabled = false;
 
   const eta = r => r > 0 ? fmtTime(file.size / r) : 'never';
+  const g = p.geo;
   const t = [
-    ['File', `${file.name}`],
-    ['Size', fmtBytes(file.size)],
-    ['Payload per code', `${p.symbolSize} B` + `  (${p.capChars} alnum chars)`],
-    ['Payload per frame', `${fmtBytes(p.symbolSize * p.cells)}`],
+    ['File', `${file.name} — ${fmtBytes(file.size)}`],
+    ['Payload per code', `${p.symbolSize} B  (${p.capChars} alnum chars)`],
     ['Blocks', `${p.numBlocks} × ${fmtBytes(p.blockSize)}  (K = ${p.K})`],
     ['Gross rate on screen', `${(p.grossRate/1024).toFixed(1)} KiB/s`],
     ['&nbsp;', ''],
-    ['<b>1080p receiver</b> — px/module', p.pxPerModule1080 + tagFor(p.pxPerModule1080, p.ver)],
-    ['&nbsp;&nbsp;estimated read rate', (p.read1080*100).toFixed(0) + '%'],
-    ['&nbsp;&nbsp;effective rate', `${(p.eff1080/1024).toFixed(1)} KiB/s`],
-    ['&nbsp;&nbsp;time to send', eta(p.eff1080)],
+    ['Transmit region on panel', `${g.rW} × ${g.rH} px`],
+    ['Code size on panel', `${g.codePx} px  (${g.scale} px per module)`],
+    ['Region → camera fill', `${(Math.min(g.camW/g.rW, g.camH/g.rH)).toFixed(2)}×`],
+    ['<b>px per module at sensor</b>', `<b>${p.pxPerModule}</b>` + tagFor(p.pxPerModule, p.ver)],
+    ['Estimated read rate', (p.read*100).toFixed(0) + '%'],
     ['&nbsp;', ''],
-    ['<b>4K receiver</b> — px/module', p.pxPerModule4K + tagFor(p.pxPerModule4K, p.ver)],
-    ['&nbsp;&nbsp;estimated read rate', (p.read4K*100).toFixed(0) + '%'],
-    ['&nbsp;&nbsp;effective rate', `${(p.eff4K/1024).toFixed(1)} KiB/s`],
+    ['Effective rate', `${(p.eff/1024).toFixed(1)} KiB/s`],
   ];
   $('plan').innerHTML = t.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('')
-    + `<tr><td>Time to send @4K</td><td class="big">${eta(p.eff4K)}</td></tr>`;
+    + `<tr><td>Time to send</td><td class="big">${eta(p.eff)}</td></tr>`;
 
   const w = [];
+  if (!g.fits)
+    w.push(`<span class="tag b">does not fit</span> A ${p.gx}×${p.gy} grid of version ${p.ver} codes will not fit in a ${g.rW}×${g.rH} region. Reduce the grid or the version.`);
+  else if (p.pxPerModule < 3)
+    w.push(`<span class="tag b">will not decode</span> This layout delivers ${p.pxPerModule} px per module at the sensor — measured read rate at that density is near zero. Hit <b>Optimise layout</b>.`);
+  else if (p.pxPerModule < 4)
+    w.push(`<span class="tag w">marginal</span> ${p.pxPerModule} px per module is on the edge. It will work with good focus and a steady mount, but expect extra sweeps.`);
   if (p.ver >= 40)
     w.push(`<span class="tag w">version 40 is a trap</span> It carries 44% more per code than v33, but in simulation it decodes less than half as often at the same pixel density — geometric error accumulates across 177 modules. More tiles at v27 or v33 beats fewer tiles at v40 almost every time.`);
-  if (p.pxPerModule1080 < 4 && p.pxPerModule4K >= 4)
-    w.push(`<span class="tag w">4K capture required</span> At 1080p this layout delivers only ${p.pxPerModule1080} px per module. Safari on iOS usually caps at 1080p, so unless your receiver captures at 4K, use a smaller grid or a lower QR version.`);
-  if (p.pxPerModule4K < 3)
-    w.push(`<span class="tag b">too dense</span> Even a 4K capture delivers only ${p.pxPerModule4K} px per module, which decoded 0% of the time in simulation. Reduce the grid or the QR version.`);
+  if (p.area === 'full' && g.SW / g.SH > 2)
+    w.push(`<span class="tag w">ultrawide panel</span> Filling a ${(g.SW/g.SH).toFixed(1)}:1 screen means the phone must letterbox and most of the sensor lands on nothing. Use a centred 16:9 block instead.`);
   if (p.fps * p.cells > 60)
     w.push(`<span class="tag w">encoder load</span> ${(p.fps*p.cells).toFixed(0)} codes/s requested. Run the benchmark — if this machine cannot sustain it, the sender will stall and rebuffer.`);
   $('warn').innerHTML = w.join('<br><br>');
@@ -2885,8 +2982,40 @@ $('drop').ondrop = e => { e.preventDefault(); $('drop').classList.remove('over')
   if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); };
 $('file').onchange = e => e.target.files[0] && setFile(e.target.files[0]);
 function setFile(f) { file = f; $('fileinfo').textContent = `${f.name} — ${fmtBytes(f.size)}`; render(); }
-['ver','ec','grid','fpc','hz','red'].forEach(id =>
+['ver','ec','grid','fpc','hz','red','area','cam','scrw','scrh'].forEach(id =>
   $(id).oninput = () => { $('preset').value = 'custom'; render(); });
+
+/* Default the panel fields to whatever this window actually reports. */
+(function detectPanel() {
+  const w = Math.round(screen.width * devicePixelRatio);
+  const h = Math.round(screen.height * devicePixelRatio);
+  if (w > 0 && h > 0) { $('scrw').value = w; $('scrh').value = h; }
+})();
+
+$('opt').onclick = () => {
+  const {fast, safe} = optimize();
+  const line = (c, label) =>
+    `<b>${label}</b> ${c.gx}×${c.gy} v${c.ver} — ${c.px} px/module, ${(c.read*100).toFixed(0)}% read, ` +
+    `${(c.eff/1024).toFixed(1)} KiB/s effective ` +
+    `<button class="ghost" style="padding:3px 9px;font-size:12px;flex:0 0 auto" ` +
+    `onclick="applyLayout(${c.gx},${c.gy},${c.ver})">use</button>`;
+  $('optout').innerHTML =
+    `For a ${$('scrw').value}×${$('scrh').value} panel, a ${$('area').value} region and a ` +
+    `${$('cam').value} camera:<br><br>` + line(safe, 'Most reliable:') + '<br><br>' + line(fast, 'Fastest:') +
+    (safe.gx === fast.gx && safe.gy === fast.gy && safe.ver === fast.ver
+      ? '<br><br>Same layout wins on both counts.'
+      : '<br><br>Start with the reliable one. Move to the faster one only once you have seen a clean transfer.');
+};
+window.applyLayout = (gx, gy, ver) => {
+  $('grid').value = gx + 'x' + gy;
+  if (![...$('grid').options].some(o => o.value === gx + 'x' + gy)) {
+    const o = document.createElement('option');
+    o.value = o.textContent = gx + 'x' + gy; $('grid').appendChild(o); $('grid').value = gx + 'x' + gy;
+  }
+  $('ver').value = String(ver);
+  $('preset').value = 'custom';
+  render();
+};
 
 const PRESETS = {
   safe:   {ver:'27', ec:'M', grid:'2x2', fpc:'5', red:'145'},
@@ -2974,7 +3103,7 @@ async function start() {
     p, sweep: 1, blockIdx: 0, packetInBlock: 0, frame: 0, packetsSent: 0,
     stop: false, buf: [], want: 240, encoder: null, encoderBlock: -1,
     pending: 0, nextId: 0, jobs: new Map(), fpsEMA: 0, lastT: 0, refresh: 0,
-    manifestDue: 0
+    manifestDue: 0, manifestBurst: MANIFEST_OPENING, testMode: false
   };
 
   /* Manifest: everything the receiver needs to rebuild the decoders. Sent
@@ -3007,9 +3136,18 @@ async function start() {
   let rr = 0;
   tx.dispatch = msg => { workers[rr++ % workers.length].postMessage(msg, [msg.bytes.buffer]); };
 
+  /* Deliberately NOT requesting fullscreen: on an ultrawide panel the
+     fullscreen transition re-lays-out the canvas and shifts the code block,
+     which knocks a mounted phone out of frame mid-transfer. The stage is a
+     plain fixed overlay — press F11 yourself beforehand if you want it. */
   $('stage').style.display = 'block';
-  if ($('stage').requestFullscreen) $('stage').requestFullscreen().catch(()=>{});
-  await produce();                       /* prebuffer before the first frame shows */
+  /* Prime with a shallow buffer so the first frame appears in about a second,
+     then let the deep lookahead fill in the background while transmitting.
+     Filling all 240 slots up front would mean nearly a thousand codes encoded
+     against a black screen before anything moves. */
+  tx.want = 24;
+  await produce();
+  tx.want = 240;
   tx.lastT = performance.now();
   requestAnimationFrame(loop);
 }
@@ -3045,8 +3183,10 @@ async function fill() {
   const p = tx.p;
   while (!tx.stop && tx.buf.length + tx.pending < tx.want) {
     /* manifest frame? */
-    if (tx.manifestDue <= 0) {
-      tx.manifestDue = MANIFEST_EVERY;
+    if (tx.manifestBurst <= 0 && tx.manifestDue <= 0) tx.manifestBurst = MANIFEST_BURST;
+    if (tx.manifestBurst > 0) {
+      tx.manifestBurst--;
+      if (tx.manifestBurst === 0) tx.manifestDue = MANIFEST_EVERY;
       const bytes = new TextEncoder().encode(JSON.stringify(tx.manifest));
       const pkt = C.packPacket(C.T_MANIFEST, 0, 0, bytes);
       const slot = {cells: [{}], gx: 1, gy: 1, left: 1, kind: 'manifest', block: 0};
@@ -3086,12 +3226,28 @@ async function fill() {
 const cv = $('cv'), ctx = cv.getContext('2d', {alpha: false});
 let off = document.createElement('canvas'), octx = off.getContext('2d');
 
+/* Compute the centred transmit region for the current canvas. */
+function regionOf(W, H) {
+  const a = tx && tx.p ? tx.p.area : '16:9';
+  if (a === 'full') return {x: 0, y: 0, w: W, h: H};
+  const aspect = a === '16:9' ? 16/9 : a === '4:3' ? 4/3 : 1;
+  let w, h;
+  if (W / H > aspect) { h = H; w = Math.round(H * aspect); }
+  else                { w = W; h = Math.round(W / aspect); }
+  return {x: Math.round((W - w)/2), y: Math.round((H - h)/2), w, h};
+}
+
 function blit(slot) {
   const W = cv.width, H = cv.height;
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
+  const R = regionOf(W, H);
+  /* Everything outside the transmit region is black: it gives the operator a
+     hard edge to frame against, and keeps stray desktop light out of the
+     camera's exposure metering. */
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff'; ctx.fillRect(R.x, R.y, R.w, R.h);
   ctx.imageSmoothingEnabled = false;
   const gx = slot.gx, gy = slot.gy;
-  const cellW = Math.floor(W / gx), cellH = Math.floor(H / gy);
+  const cellW = Math.floor(R.w / gx), cellH = Math.floor(R.h / gy);
   for (let i = 0; i < slot.cells.length; i++) {
     const c = slot.cells[i]; if (!c.bits) continue;
     const n = c.n, quiet = 4, full = n + quiet * 2;
@@ -3108,9 +3264,16 @@ function blit(slot) {
     /* integer scale keeps every module an exact pixel block */
     const scale = Math.max(1, Math.floor(Math.min(cellW, cellH) / full));
     const size = scale * full;
-    const x = (i % gx) * cellW + ((cellW - size) >> 1);
-    const y = ((i / gx) | 0) * cellH + ((cellH - size) >> 1);
+    const x = R.x + (i % gx) * cellW + ((cellW - size) >> 1);
+    const y = R.y + ((i / gx) | 0) * cellH + ((cellH - size) >> 1);
     ctx.drawImage(off, x, y, size, size);
+  }
+  if (slot.kind === 'manifest' || slot.kind === 'test') {
+    ctx.fillStyle = '#000';
+    ctx.font = `${Math.round(R.h * 0.035)}px ui-monospace,monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText(slot.kind === 'test' ? 'LINK TEST' : 'SYNC',
+                 R.x + R.w/2, R.y + R.h - Math.round(R.h * 0.02));
   }
 }
 
@@ -3122,9 +3285,11 @@ function loop(t) {
   tx.refresh++;
   if (tx.refresh >= tx.p.fpc) {
     tx.refresh = 0;
-    const slot = tx.buf.shift();
+    /* In link-test mode the same slot stays on screen indefinitely. */
+    const slot = tx.testMode ? (tx.buf[0] || null) : tx.buf.shift();
     if (slot) {
       blit(slot);
+      if (tx.testMode && tx.buf.length < 2 && tx.produceMore) tx.produceMore();
       tx.frame++;
       if (slot.kind === 'data') tx.packetsSent += slot.cells.length;
       const dt = t - tx.lastT; tx.lastT = t;
@@ -3135,13 +3300,23 @@ function loop(t) {
       tx.refresh = tx.p.fpc - 1;      /* starved: hold the current code, retry next refresh */
       $('h-buf').textContent = 'REBUFFERING';
     }
-    produce();
+    if (!tx.testMode) produce();
   }
   requestAnimationFrame(loop);
 }
 
 function hud(slot) {
   const p = tx.p;
+  if (tx.testMode) {
+    $('h-block').textContent = 'LINK TEST';
+    $('h-sweep').textContent = `v${p.ver}-${p.ec}`;
+    $('h-frame').textContent = tx.frame.toLocaleString();
+    $('h-sent').textContent = p.area;
+    $('h-fps').textContent = tx.fpsEMA.toFixed(1);
+    $('h-buf').textContent = 'static';
+    $('h-eta').textContent = 'Esc to stop';
+    return;
+  }
   $('h-block').textContent = (slot.block ?? 0) + 1 + '/' + p.numBlocks;
   $('h-sweep').textContent = tx.sweep;
   $('h-frame').textContent = tx.frame.toLocaleString();
@@ -3155,12 +3330,59 @@ function hud(slot) {
 function stop() {
   if (!tx) return;
   tx.stop = true;
-  tx.workers.forEach(w => w.terminate());
+  (tx.workers || []).forEach(w => w.terminate());
   tx = null;
   $('stage').style.display = 'none';
-  if (document.fullscreenElement) document.exitFullscreen().catch(()=>{});
 }
 
+/* ---------- link test ----------
+   A static full-region code with a fixed payload, no file required. It answers
+   the only question worth asking first: can this phone, on this mount, at this
+   distance, read anything at all off this screen? The receiver reports the
+   pixels-per-module it actually measures, so framing and focus can be tuned
+   before committing to a transfer. */
+async function startLinkTest() {
+  const ver = +$('ver').value, ec = $('ec').value;
+  const [gx, gy] = $('grid').value.split('x').map(Number);
+  tx = {
+    p: {ver, ec, gx: 1, gy: 1, cells: 1, fpc: +$('fpc').value, numBlocks: 1,
+        symbolSize: 0, area: $('area').value, framesPerSweep: 1},
+    sweep: 0, blockIdx: 0, frame: 0, packetsSent: 0, stop: false,
+    buf: [], want: 4, pending: 0, nextId: 0, jobs: new Map(),
+    fpsEMA: 0, lastT: 0, refresh: 0, testMode: true, manifestBurst: 0, manifestDue: 1e9
+  };
+  const w = new Worker(workerURL);
+  w.onerror = ev => { $('h-buf').textContent = 'ENCODER ERROR'; console.error(ev.message); };
+  w.onmessage = e => {
+    const job = tx.jobs.get(e.data.id); if (!job) return;
+    tx.jobs.delete(e.data.id);
+    job.cell.bits = e.data.bits; job.cell.n = e.data.n;
+    job.slot.left--;
+    if (job.slot.left === 0) { tx.buf.push(job.slot); tx.pending--; }
+  };
+  tx.workers = [w];
+
+  /* Advertise the layout under test so the receiver can report px/module. */
+  const payload = new TextEncoder().encode(JSON.stringify({
+    v: 2, test: true, ver, ec, grid: gx + 'x' + gy, area: $('area').value,
+    panel: $('scrw').value + 'x' + $('scrh').value
+  }));
+  const pkt = C.packPacket(C.T_MANIFEST, 0, 0, payload);
+  tx.produceMore = () => {
+    const slot = {cells: [{}], gx: 1, gy: 1, left: 1, kind: 'test', block: 0};
+    tx.pending++;
+    tx.jobs.set(tx.nextId, {slot, cell: slot.cells[0]});
+    w.postMessage({id: tx.nextId++, ver, ec, bytes: Uint8Array.from(pkt)});
+  };
+  tx.produceMore();
+
+  $('stage').style.display = 'block';
+  await new Promise(r => setTimeout(r, 400));
+  tx.lastT = performance.now();
+  requestAnimationFrame(loop);
+}
+
+$('linktest').onclick = startLinkTest;
 $('go').onclick = start;
 addEventListener('keydown', e => {
   if (e.key === 'Escape') stop();
